@@ -1,0 +1,17 @@
+[package]
+name = "sourcemapt"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "4.2"
+dirs = "5"
+tokio-util = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+toml = "0.7"
+openai_dive = { version = "0.2", features = ["stream"] }
+crossterm = "0.26"
+regex = "1"
+futures = "0.3"
