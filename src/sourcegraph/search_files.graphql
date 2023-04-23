@@ -1,0 +1,19 @@
+query SearchFiles($query: String!) {
+    search(query: $query) {
+        results {
+            results {
+                __typename
+                ... on FileMatch {
+                    file {
+                        path
+                        url
+                    }
+                    lineMatches {
+                        preview
+                        lineNumber
+                    }
+                }
+            }
+        }
+    }
+}

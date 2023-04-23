@@ -64,3 +64,7 @@ I found the implementation of the `StatesHasBeenSynced` method in the `reconcile
 !READ_LINES "pkg/kubelet/volumemanager/reconciler/reconstruct_common.go" "79" "5"
 ```
 "#;
+
+pub(crate) const ASK_TO_EXIT: &str = r#"
+Do you have anything more to say? If so, say `CONTINUE`. Otherwise, say `COMPLETE`.
+"#;

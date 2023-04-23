@@ -3,9 +3,10 @@ mod consts;
 #[macro_use]
 mod util;
 
+mod sourcegraph;
+
+use crate::sourcegraph::search_files;
 use crossterm::queue;
-use futures::stream::iter;
-use futures::StreamExt;
 use openai_dive::v1::api::Client;
 use openai_dive::v1::resources::chat_completion::{ChatCompletionParameters, ChatMessage, Role};
 use regex::Regex;
@@ -13,46 +14,49 @@ use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
-use std::{fmt, fs};
-use tokio::stream;
+use std::{fmt, fs, process};
 use toml::Value;
 
 #[tokio::main]
 async fn main() {
     let api_key = read_or_create_config().unwrap();
 
-    let mut sourcemapt = Sourcemapt::new(api_key);
+    let mut sourcemapt = Sourcemapt::new(api_key, "github.com/kubernetes/kubernetes".to_owned());
+    sourcemapt.add_system();
 
-    let responses = sourcemapt.call_gpt4(
-        Role::User,
-        "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_string(),
-        consts::TEST1,
-    ).await.unwrap();
-
-    for response in responses {
-        println!("{}", response);
+    match sourcemapt.run_loop().await {
+        None => {}
+        Some(e) => {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
     }
 
-    let responses = sourcemapt
-        .call_gpt4(
-            Role::User,
-            "Can you summarize what the code does?".to_string(),
-            consts::TEST2,
-        )
-        .await
-        .unwrap();
-
-    for response in responses {
-        println!("{}", response);
+    for message in sourcemapt.messages {
+        println!("{}", message);
     }
 }
 
 enum SourcemaptMessage {
     System { content: String, hidden: bool },
     User { content: String, hidden: bool },
-    UserInjected { content: String, hidden: bool },
-    ModelMessage { content: String, hidden: bool },
-    ModelCommand { command: Command, hidden: bool },
+    Injected { content: String, hidden: bool },
+    Model { content: String, hidden: bool },
+    CommandInvocation { command: Command, hidden: bool },
+    CommandResult { content: String, hidden: bool },
+}
+
+impl SourcemaptMessage {
+    fn hidden(&self) -> bool {
+        match self {
+            SourcemaptMessage::System { hidden, .. } => *hidden,
+            SourcemaptMessage::User { hidden, .. } => *hidden,
+            SourcemaptMessage::Injected { hidden, .. } => *hidden,
+            SourcemaptMessage::Model { hidden, .. } => *hidden,
+            SourcemaptMessage::CommandInvocation { hidden, .. } => *hidden,
+            SourcemaptMessage::CommandResult { hidden, .. } => *hidden,
+        }
+    }
 }
 
 impl Clone for SourcemaptMessage {
@@ -66,21 +70,23 @@ impl Clone for SourcemaptMessage {
                 content: content.clone(),
                 hidden: *hidden,
             },
-            SourcemaptMessage::UserInjected { content, hidden } => {
-                SourcemaptMessage::UserInjected {
-                    content: content.clone(),
-                    hidden: *hidden,
-                }
-            }
-            SourcemaptMessage::ModelMessage { content, hidden } => {
-                SourcemaptMessage::ModelMessage {
-                    content: content.clone(),
-                    hidden: *hidden,
-                }
-            }
-            SourcemaptMessage::ModelCommand { command, hidden } => {
-                SourcemaptMessage::ModelCommand {
+            SourcemaptMessage::Injected { content, hidden } => SourcemaptMessage::Injected {
+                content: content.clone(),
+                hidden: *hidden,
+            },
+            SourcemaptMessage::Model { content, hidden } => SourcemaptMessage::Model {
+                content: content.clone(),
+                hidden: *hidden,
+            },
+            SourcemaptMessage::CommandInvocation { command, hidden } => {
+                SourcemaptMessage::CommandInvocation {
                     command: command.clone(),
+                    hidden: *hidden,
+                }
+            }
+            SourcemaptMessage::CommandResult { content, hidden } => {
+                SourcemaptMessage::CommandResult {
+                    content: content.clone(),
                     hidden: *hidden,
                 }
             }
@@ -175,49 +181,38 @@ impl FromStr for Command {
 }
 
 impl SourcemaptMessage {
-    // Returns None if `hidden` is true
-    fn map_to_chat_message(&self) -> Option<ChatMessage> {
+    fn map_to_chat_message(&self) -> ChatMessage {
         match self {
-            SourcemaptMessage::System { content, hidden } => {
-                if *hidden { return None; }
-                Some(ChatMessage {
-                    role: Role::System,
-                    content: content.clone(),
-                    name: None,
-                })
-            }
-            SourcemaptMessage::User { content, hidden } => {
-                if *hidden { return None; }
-                Some(ChatMessage {
-                    role: Role::User,
-                    content: content.clone(),
-                    name: None,
-                })
-            }
-            SourcemaptMessage::UserInjected { content, hidden } => {
-                if *hidden { return None; }
-                Some(ChatMessage {
-                    role: Role::User,
-                    content: content.clone(),
-                    name: None,
-                })
-            }
-            SourcemaptMessage::ModelMessage { content, hidden } => {
-                if *hidden { return None; }
-                Some(ChatMessage {
-                    role: Role::Assistant,
-                    content: content.clone(),
-                    name: None,
-                })
-            }
-            SourcemaptMessage::ModelCommand { command, hidden } => {
-                if *hidden { return None; }
-                Some(ChatMessage {
-                    role: Role::Assistant,
-                    content: command.serialize(),
-                    name: None,
-                })
-            }
+            SourcemaptMessage::System { content, .. } => ChatMessage {
+                role: Role::System,
+                content: content.clone(),
+                name: None,
+            },
+            SourcemaptMessage::User { content, .. } => ChatMessage {
+                role: Role::User,
+                content: content.clone(),
+                name: None,
+            },
+            SourcemaptMessage::Injected { content, .. } => ChatMessage {
+                role: Role::User,
+                content: content.clone(),
+                name: None,
+            },
+            SourcemaptMessage::Model { content, .. } => ChatMessage {
+                role: Role::Assistant,
+                content: content.clone(),
+                name: None,
+            },
+            SourcemaptMessage::CommandInvocation { command, .. } => ChatMessage {
+                role: Role::Assistant,
+                content: command.serialize(),
+                name: None,
+            },
+            SourcemaptMessage::CommandResult { content, .. } => ChatMessage {
+                role: Role::User,
+                content: content.clone(),
+                name: None,
+            },
         }
     }
 
@@ -225,33 +220,37 @@ impl SourcemaptMessage {
         match self {
             SourcemaptMessage::System { .. } => Role::System,
             SourcemaptMessage::User { .. } => Role::User,
-            SourcemaptMessage::UserInjected { .. } => Role::User,
-            SourcemaptMessage::ModelMessage { .. } => Role::Assistant,
-            SourcemaptMessage::ModelCommand { .. } => Role::Assistant,
+            SourcemaptMessage::Injected { .. } => Role::User,
+            SourcemaptMessage::Model { .. } => Role::Assistant,
+            SourcemaptMessage::CommandInvocation { .. } => Role::Assistant,
+            SourcemaptMessage::CommandResult { .. } => Role::User,
         }
     }
 }
 
 impl fmt::Display for SourcemaptMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SourcemaptMessage::System { content, hidden } => {
-                write!(f, "System [hidden: {}]: @@@{}@@@", hidden, content)
+        let (label, content, hidden) = match self {
+            SourcemaptMessage::System { content, hidden } => ("System", content.clone(), hidden),
+            SourcemaptMessage::User { content, hidden } => ("User", content.clone(), hidden),
+            SourcemaptMessage::Injected { content, hidden } => ("UserInjected", content.clone(), hidden),
+            SourcemaptMessage::Model { content, hidden } => ("ModelMessage", content.clone(), hidden),
+            SourcemaptMessage::CommandInvocation { command, hidden } => {
+                ("CommandInvocation", format!("{}", command), hidden)
             }
-            SourcemaptMessage::User { content, hidden } => {
-                write!(f, "User [hidden: {}]: @@@{}@@@", hidden, content)
-            }
-            SourcemaptMessage::UserInjected { content, hidden } => {
-                write!(f, "UserInjected [hidden: {}]: @@@{}@@@", hidden, content)
-            }
-            SourcemaptMessage::ModelMessage { content, hidden } => {
-                write!(f, "ModelMessage [hidden: {}]: @@@{}@@@", hidden, content)
-            }
-            SourcemaptMessage::ModelCommand { command, hidden } => {
-                write!(f, "ModelCommand [hidden: {}]: @@@{}@@@", hidden, command)
-            }
-        }
+            SourcemaptMessage::CommandResult { content, hidden } => ("CommandResult", content.clone(), hidden),
+        };
+
+        write!(f, "{} [hidden: {}]\n", label, hidden)?;
+        write_lines(f, &content)
     }
+}
+
+fn write_lines(f: &mut fmt::Formatter<'_>, content: &str) -> fmt::Result {
+    for line in content.lines() {
+        writeln!(f, "| {}", line)?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for Command {
@@ -278,65 +277,101 @@ impl fmt::Display for Command {
 struct Sourcemapt {
     client: Client,
 
-    history: Vec<SourcemaptMessage>,
+    messages: Vec<SourcemaptMessage>,
+
+    repo: String,
+}
+
+enum ProcessResponsesOutcome {
+    CallForIntrospect,
+    CallWithCommandResults(Vec<SourcemaptMessage>),
+    Stop,
 }
 
 impl Sourcemapt {
-    fn new(api_key: String) -> Self {
+    fn new(api_key: String, repo: String) -> Self {
         Self {
             client: Client::new(api_key),
-            history: Vec::new(),
+            messages: Vec::new(),
+            repo: repo,
+        }
+    }
+
+    fn add_system(&mut self) {
+        self.messages.push(SourcemaptMessage::System {
+            content: consts::SYSTEM.to_string(),
+            hidden: false,
+        });
+    }
+
+    async fn run_loop(&mut self) -> Option<Box<dyn Error>> {
+        let mut responses;
+
+        responses = self.call_gpt4(
+            &vec![SourcemaptMessage::User {
+                content: "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_string(),
+                hidden: false,
+            }],
+        ).await.ok()?.to_vec();
+
+        loop {
+            for response in &responses {
+                println!("{}", response);
+            }
+
+            let result = self.process_responses(&responses).await.ok()?;
+
+            println!();
+
+            match result {
+                ProcessResponsesOutcome::CallForIntrospect => {
+                    print_success!("-> Outcome: Introspect");
+                    // TODO: Remove
+                    // responses = self.call_gpt4(&Vec::new()).await.unwrap().to_vec();
+
+                    responses = self.call_gpt4(&vec![
+                        SourcemaptMessage::Injected {
+                            content: "Can I see some more content from the first file?".to_string(),
+                            hidden: false,
+                        }
+                    ]).await.unwrap().to_vec();
+                }
+                ProcessResponsesOutcome::CallWithCommandResults(results) => {
+                    print_success!("-> Outcome: Call with command results:");
+                    for result in &results {
+                        print_success!("   {}", result);
+                    }
+                    responses = self.call_gpt4(&results).await.unwrap().to_vec();
+                }
+                ProcessResponsesOutcome::Stop => {
+                    print_success!("-> Outcome: Stop");
+                    return None;
+                }
+            }
         }
     }
 
     async fn call_gpt4(
         &mut self,
-        role: Role,
-        content: String,
-        completion: &str,
+        messages: &[SourcemaptMessage],
     ) -> Result<&[SourcemaptMessage], Box<dyn Error>> {
-        let mut prompt_messages = vec![ChatMessage {
-            role: Role::System,
-            content: consts::SYSTEM.to_string(),
-            name: None,
-        }];
-
-        for hist_message in &self.history {
-            match hist_message.map_to_chat_message() {
-                None => {}
-                Some(v) => prompt_messages.push(v),
-            }
+        for message in messages {
+            self.messages.push(message.clone());
         }
 
-        //
+        let mut prompt_messages = Vec::new();
 
-        let hist_end = self.history.len();
-        let message = match role {
-            Role::User => SourcemaptMessage::User {
-                content: content.clone(),
-                hidden: false,
-            },
-            Role::Assistant => SourcemaptMessage::ModelMessage {
-                content: content.clone(),
-                hidden: false,
-            },
-            _ => {
-                panic!("Invalid call role: {:?}", role)
-            }
-        };
-        self.history.push(message);
+        for hist_message in &self.messages {
+            if hist_message.hidden() { continue; }
+            prompt_messages.push(hist_message.map_to_chat_message());
+        }
 
-        let prompt_message = ChatMessage {
-            role: clone_role(&role),
-            content: content.clone(),
-            name: None,
-        };
-        prompt_messages.push(prompt_message);
+        let hist_end = self.messages.len();
 
         //
 
         let parameters = ChatCompletionParameters {
-            model: "gpt-3.5-turbo".to_string(),
+            model: "gpt-4".to_string(),
             messages: prompt_messages,
             temperature: None,
             top_p: None,
@@ -348,12 +383,12 @@ impl Sourcemapt {
             logit_bias: None,
         };
 
-        // let completion_r = self.client.chat().create(parameters).await.unwrap();
-        // let completion = completion_r.choices[0].message.content.trim();
+        let completion_r = self.client.chat().create(parameters).await.unwrap();
+        let completion = completion_r.choices[0].message.content.trim();
 
-        println!("-----");
-        println!("{}", completion);
-        println!("-----");
+        // println!("-----");
+        // println!("{}", completion);
+        // println!("-----");
 
         let mut buffer = String::new();
         let mut skip_next_line = false;
@@ -366,7 +401,7 @@ impl Sourcemapt {
 
             if Command::match_line(line) {
                 if !buffer.trim().is_empty() && buffer.trim() != "```" && buffer.trim() != r#"""""# {
-                    self.history.push(SourcemaptMessage::ModelMessage {
+                    self.messages.push(SourcemaptMessage::Model {
                         content: buffer.trim().to_owned(),
                         hidden: false,
                     });
@@ -374,7 +409,7 @@ impl Sourcemapt {
                 }
 
                 let command = line.parse::<Command>()?;
-                self.history.push(SourcemaptMessage::ModelCommand {
+                self.messages.push(SourcemaptMessage::CommandInvocation {
                     command,
                     hidden: false,
                 });
@@ -394,13 +429,67 @@ impl Sourcemapt {
         }
 
         if !buffer.trim().is_empty() {
-            self.history.push(SourcemaptMessage::ModelMessage {
+            self.messages.push(SourcemaptMessage::Model {
                 content: buffer.trim().to_owned(),
                 hidden: false,
             });
         }
 
-        Ok(&self.history[hist_end..])
+        Ok(&self.messages[hist_end..])
+    }
+
+    async fn process_responses(
+        &mut self,
+        responses: &[SourcemaptMessage],
+    ) -> Result<ProcessResponsesOutcome, Box<dyn Error>> {
+        let mut command_results = Vec::new();
+
+        for response in responses {
+            match response {
+                SourcemaptMessage::Model { .. } => {}
+                SourcemaptMessage::CommandInvocation { command, hidden } => {
+                    println!("");
+                    match command {
+                        Command::SearchFiles { keywords } => {
+                            let res = search_files::search_files(
+                                &self.repo,
+                                keywords.as_slice(),
+                            ).await?;
+
+                            let json = serde_json::to_string(&res)?;
+
+                            command_results.push(SourcemaptMessage::CommandResult {
+                                content: json,
+                                hidden: false,
+                            })
+                        }
+                        Command::ReadLines { file, start, n } => {
+                            let content = get_file_content(&self.repo, file).await.unwrap();
+
+                            let lines = content.lines()
+                                .skip(*start)
+                                .take(*n)
+                                .collect::<Vec<&str>>()
+                                .join("\n");
+
+                            command_results.push(SourcemaptMessage::CommandResult {
+                                content: lines,
+                                hidden: false,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Unexpected response message: {}", response);
+                }
+            }
+        }
+
+        if command_results.is_empty() {
+            return Ok(ProcessResponsesOutcome::CallForIntrospect);
+        }
+
+        return Ok(ProcessResponsesOutcome::CallWithCommandResults(command_results));
     }
 
     fn eval_should_hide(&mut self) {}
@@ -425,7 +514,7 @@ fn read_or_create_config() -> Result<String, Box<dyn Error>> {
             config_path.display()
         );
         print_success!("Set the 'key' value in the file before using the program.");
-        std::process::exit(1);
+        process::exit(1);
     }
 
     let config = fs::read_to_string(&config_path)?.parse::<Value>()?;
@@ -437,7 +526,7 @@ fn read_or_create_config() -> Result<String, Box<dyn Error>> {
                 "The 'key' value is not set in the configuration file: {}",
                 config_path.display()
             );
-            std::process::exit(1);
+            process::exit(1);
         }
     };
 
@@ -446,17 +535,59 @@ fn read_or_create_config() -> Result<String, Box<dyn Error>> {
             "Set the 'key' value in the configuration file before using the program: {}",
             config_path.display()
         );
-        std::process::exit(1);
+        process::exit(1);
     }
 
     Ok(key)
 }
 
-// Surely there's a better way to do this lol.
-fn clone_role(role: &Role) -> Role {
-    match role {
-        Role::System => Role::System,
-        Role::User => Role::User,
-        Role::Assistant => Role::Assistant,
+async fn get_file_content(repo_url: &str, file_path: &str) -> Result<String, Box<dyn Error>> {
+    let (host, repo) = parse_repo_url(repo_url).unwrap();
+    let api_url = match host.as_str() {
+        "github.com" => format!(
+            "https://api.github.com/repos/{}/contents/{}",
+            repo, file_path
+        ),
+        "gitlab.com" => format!(
+            "https://gitlab.com/api/v4/projects/{}/repository/files/{}/raw",
+            repo.replace("/", "%2F"),
+            file_path.replace("/", "%2F")
+        ),
+        _ => return Err("unsupported host".into()),
+    };
+
+    let client = reqwest::Client::builder()
+        .user_agent("dev.ruckman.sourcemapt")
+        .build()?;
+    let resp = client.get(&api_url).send().await.unwrap();
+
+    let resp = resp.json::<Value>().await.unwrap();
+
+    let content_base64 = match host.as_str() {
+        "github.com" => {
+            let content = resp["content"].as_str().ok_or("content not found")?;
+            content.replace("\n", "")
+        }
+        "gitlab.com" => {
+            let content = resp["content"].as_str().ok_or("content not found").unwrap();
+            base64::encode(content)
+        }
+        _ => return Err("unsupported host".into()),
+    };
+
+    let content = base64::decode(content_base64).unwrap().into_iter().map(|c| c as char).collect();
+
+    Ok(content)
+}
+
+fn parse_repo_url(repo_url: &str) -> Result<(String, String), Box<dyn Error>> {
+    let parts: Vec<&str> = repo_url.split('/').collect();
+    if parts.len() != 3 {
+        return Err("invalid repo url".into());
     }
+
+    let host = parts[0].to_string();
+    let repo = format!("{}/{}", parts[1], parts[2]);
+
+    Ok((host, repo))
 }
