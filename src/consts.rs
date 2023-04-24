@@ -68,3 +68,9 @@ I found the implementation of the `StatesHasBeenSynced` method in the `reconcile
 pub(crate) const ASK_TO_EXIT: &str = r#"
 Do you have anything more to say? If so, say `CONTINUE`. Otherwise, say `COMPLETE`.
 "#;
+
+pub(crate) const ASK_TO_SUMMARIZE: &str = r#"
+Are you able to confidently answer my initial question now?
+If so, say `IN SUMMARY:`, followed by your answer.
+Otherwise, continue to SEARCH_FILES and READ_LINES as needed.
+"#;

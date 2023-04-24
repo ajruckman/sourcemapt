@@ -329,9 +329,16 @@ impl Sourcemapt {
                     // TODO: Remove
                     // responses = self.call_gpt4(&Vec::new()).await.unwrap().to_vec();
 
+                    // responses = self.call_gpt4(&vec![
+                    //     SourcemaptMessage::Injected {
+                    //         content: "Can I see some more content from the first file?".to_string(),
+                    //         hidden: false,
+                    //     }
+                    // ]).await.unwrap().to_vec();
+
                     responses = self.call_gpt4(&vec![
                         SourcemaptMessage::Injected {
-                            content: "Can I see some more content from the first file?".to_string(),
+                            content: consts::ASK_TO_SUMMARIZE.to_owned(),
                             hidden: false,
                         }
                     ]).await.unwrap().to_vec();
