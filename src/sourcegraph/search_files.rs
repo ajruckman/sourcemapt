@@ -1,15 +1,15 @@
 use graphql_client::reqwest::post_graphql;
 use graphql_client::GraphQLQuery;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
+use crate::sourcegraph::client::SourcegraphClient;
 
 use crate::sourcegraph::search_files::search_files::SearchFilesSearchResultsResults;
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "src/sourcegraph/sourcegraph.graphql",
-    query_path = "src/sourcegraph/search_files.graphql",
+    schema_path = "src/sourcegraph/schema/sourcegraph.graphql",
+    query_path = "src/sourcegraph/query/search_files.graphql",
     response_derives = "Debug"
 )]
 struct SearchFiles;
@@ -32,52 +32,40 @@ pub struct SearchFilesFileLine {
     preview: String,
 }
 
-pub async fn search_files(
-    repo: &str,
-    search_terms: &[String],
-) -> Result<SearchFilesResult, Box<dyn Error>> {
-    let sourcegraph_api_token =
-        std::env::var("SOURCEGRAPH_API_TOKEN").expect("Missing SOURCEGRAPH_API_TOKEN env var");
+impl SourcegraphClient {
+    pub async fn search_files(
+        &self,
+        repo: &str,
+        search_terms: &[String],
+    ) -> Result<SearchFilesResult, Box<dyn Error>> {
+        let query = format!("repo:^{}$", repo.replace(".", r#"\."#));
 
-    let client = Client::builder()
-        .user_agent("graphql-rust/0.10.0")
-        .default_headers(
-            std::iter::once((
-                reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&format!(
-                    "Bearer {}",
-                    sourcegraph_api_token
-                ))
-                .unwrap(),
-            ))
-            .collect(),
+        let query = format!(
+            "{} {}",
+            query,
+            search_terms
+                .iter()
+                .map(|term| format!("({})", term))
+                .collect::<Vec<String>>()
+                .join(" OR ")
+        );
+
+        println!("| Query: {}", query);
+
+        let variables = search_files::Variables { query };
+
+        let response_body = post_graphql::<SearchFiles, _>(
+            &self.client,
+            "https://sourcegraph.com/.api/graphql",
+            variables,
         )
-        .build()?;
-
-    let query = format!("repo:^{}$", repo.replace(".", r#"\."#));
-
-    let query = format!(
-        "{} {}",
-        query,
-        search_terms
-            .iter()
-            .map(|term| format!("({})", term))
-            .collect::<Vec<String>>()
-            .join(" OR ")
-    );
-
-    println!("query: {}", query);
-
-    let variables = search_files::Variables { query };
-
-    let response_body =
-        post_graphql::<SearchFiles, _>(&client, "https://sourcegraph.com/.api/graphql", variables)
             .await?;
 
-    let response_data: search_files::ResponseData =
-        response_body.data.expect("missing response data");
-    let output = map(response_data);
-    Ok(output)
+        let response_data: search_files::ResponseData =
+            response_body.data.expect("missing response data");
+        let output = map(response_data);
+        Ok(output)
+    }
 }
 
 fn map(response_data: search_files::ResponseData) -> SearchFilesResult {

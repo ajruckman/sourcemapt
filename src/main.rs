@@ -5,7 +5,6 @@ mod util;
 
 mod sourcegraph;
 
-use crate::sourcegraph::search_files;
 use crossterm::queue;
 use openai_dive::v1::api::Client;
 use openai_dive::v1::resources::chat_completion::{ChatCompletionParameters, ChatMessage, Role};
@@ -16,12 +15,19 @@ use std::io::Write;
 use std::str::FromStr;
 use std::{fmt, fs, process};
 use toml::Value;
+use crate::sourcegraph::client::SourcegraphClient;
+
+// TODO: Side analyzer to strip licenses, irrelevant comments, etc. from GET_LINES to save tokens
 
 #[tokio::main]
 async fn main() {
     let api_key = read_or_create_config().unwrap();
 
-    let mut sourcemapt = Sourcemapt::new(api_key, "github.com/kubernetes/kubernetes".to_owned());
+    let mut sourcemapt = Sourcemapt::new(
+        api_key,
+        "github.com/kubernetes/kubernetes".to_owned(),
+        "master".to_owned(),
+    );
     sourcemapt.add_system();
 
     match sourcemapt.run_loop().await {
@@ -275,11 +281,13 @@ impl fmt::Display for Command {
 }
 
 struct Sourcemapt {
-    client: Client,
+    openai_client: Client,
+    sourcegraph_client: SourcegraphClient,
 
     messages: Vec<SourcemaptMessage>,
 
     repo: String,
+    refspec: String,
 }
 
 enum ProcessResponsesOutcome {
@@ -289,11 +297,13 @@ enum ProcessResponsesOutcome {
 }
 
 impl Sourcemapt {
-    fn new(api_key: String, repo: String) -> Self {
+    fn new(api_key: String, repo: String, refspec: String) -> Self {
         Self {
-            client: Client::new(api_key),
+            openai_client: Client::new(api_key),
+            sourcegraph_client: SourcegraphClient::new(),
             messages: Vec::new(),
             repo: repo,
+            refspec: refspec,
         }
     }
 
@@ -320,8 +330,6 @@ impl Sourcemapt {
             }
 
             let result = self.process_responses(&responses).await.ok()?;
-
-            println!();
 
             match result {
                 ProcessResponsesOutcome::CallForIntrospect => {
@@ -390,7 +398,7 @@ impl Sourcemapt {
             logit_bias: None,
         };
 
-        let completion_r = self.client.chat().create(parameters).await.unwrap();
+        let completion_r = self.openai_client.chat().create(parameters).await.unwrap();
         let completion = completion_r.choices[0].message.content.trim();
 
         // println!("-----");
@@ -458,7 +466,7 @@ impl Sourcemapt {
                     println!("");
                     match command {
                         Command::SearchFiles { keywords } => {
-                            let res = search_files::search_files(
+                            let res = self.sourcegraph_client.search_files(
                                 &self.repo,
                                 keywords.as_slice(),
                             ).await?;
@@ -471,7 +479,13 @@ impl Sourcemapt {
                             })
                         }
                         Command::ReadLines { file, start, n } => {
-                            let content = get_file_content(&self.repo, file).await.unwrap();
+                            let file_content_result = self.sourcegraph_client.get_file_content(
+                                &self.repo,
+                                &self.refspec,
+                                file,
+                            ).await?;
+
+                            let content = file_content_result.content;
 
                             let lines = content.lines()
                                 .skip(*start)
@@ -492,11 +506,19 @@ impl Sourcemapt {
             }
         }
 
-        if command_results.is_empty() {
-            return Ok(ProcessResponsesOutcome::CallForIntrospect);
+        if !(command_results.is_empty()) {
+            return Ok(ProcessResponsesOutcome::CallWithCommandResults(command_results));
         }
 
-        return Ok(ProcessResponsesOutcome::CallWithCommandResults(command_results));
+        if let Some(last) = responses.last() {
+            if let SourcemaptMessage::Model { content, .. } = last {
+                if content.contains("IN SUMMARY:") {
+                    return Ok(ProcessResponsesOutcome::Stop);
+                }
+            }
+        }
+
+        Ok(ProcessResponsesOutcome::CallForIntrospect)
     }
 
     fn eval_should_hide(&mut self) {}
@@ -546,55 +568,4 @@ fn read_or_create_config() -> Result<String, Box<dyn Error>> {
     }
 
     Ok(key)
-}
-
-async fn get_file_content(repo_url: &str, file_path: &str) -> Result<String, Box<dyn Error>> {
-    let (host, repo) = parse_repo_url(repo_url).unwrap();
-    let api_url = match host.as_str() {
-        "github.com" => format!(
-            "https://api.github.com/repos/{}/contents/{}",
-            repo, file_path
-        ),
-        "gitlab.com" => format!(
-            "https://gitlab.com/api/v4/projects/{}/repository/files/{}/raw",
-            repo.replace("/", "%2F"),
-            file_path.replace("/", "%2F")
-        ),
-        _ => return Err("unsupported host".into()),
-    };
-
-    let client = reqwest::Client::builder()
-        .user_agent("dev.ruckman.sourcemapt")
-        .build()?;
-    let resp = client.get(&api_url).send().await.unwrap();
-
-    let resp = resp.json::<Value>().await.unwrap();
-
-    let content_base64 = match host.as_str() {
-        "github.com" => {
-            let content = resp["content"].as_str().ok_or("content not found")?;
-            content.replace("\n", "")
-        }
-        "gitlab.com" => {
-            let content = resp["content"].as_str().ok_or("content not found").unwrap();
-            base64::encode(content)
-        }
-        _ => return Err("unsupported host".into()),
-    };
-
-    let content = base64::decode(content_base64).unwrap().into_iter().map(|c| c as char).collect();
-
-    Ok(content)
-}
-
-fn parse_repo_url(repo_url: &str) -> Result<(String, String), Box<dyn Error>> {
-    let parts: Vec<&str> = repo_url.split('/').collect();
-    if parts.len() != 3 {
-        return Err("invalid repo url".into());
-    }
-
-    let host = parts[0].to_string();
-    let repo = format!("{}/{}", parts[1], parts[2]);
-
-    Ok((host, repo))
 }

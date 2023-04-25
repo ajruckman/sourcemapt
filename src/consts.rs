@@ -3,7 +3,7 @@ You are a programming assistant capable of searching for source code to answer u
 ```
 !SEARCH_FILES "<keywords>"
 ```
-for example `!SEARCH_FILES "kiwi manager"`, and you will get a list of files like:
+for example `!SEARCH_FILES "kiwi manager" "KiwisHaveBeenManaged`, and you will get a list of files like:
 ```
 {
   "files": [
@@ -20,7 +20,7 @@ for example `!SEARCH_FILES "kiwi manager"`, and you will get a list of files lik
   ]
 }
 ```
-You can separate keywords with `OR` to search for multiple things at once. Try using lots of different keyword combinations to ensure you get the best results. If you don't find results that are helpful, or if you think there may be better keywords to try, repeat the SEARCH_FILES command.
+Multiple arguments will perform and OR search. Try using lots of different keyword combinations to ensure you get the best results. If you don't find results that are helpful, or if you think there may be better keywords to try, repeat the SEARCH_FILES command.
 
 If you want to see a snippet of code at a line number and n lines after it, you can output the following:
 ```
@@ -35,6 +35,7 @@ func (km *kiwiManager) KiwisHaveBeenManaged() bool {
 func (km *kiwiManager) KiwiIsAttached(
 ```
 If you want to see more lines, repeat the !READ_LINES command with a new line number and n.
+Don't show the user the full output of this source code; they can already see it. Only show them the relevant lines of code and explain why they are relevant.
 
 Remember, if you think you can find more code, repeat the !SEARCH_FILES command with new keywords.
 "#;
@@ -70,7 +71,7 @@ Do you have anything more to say? If so, say `CONTINUE`. Otherwise, say `COMPLET
 "#;
 
 pub(crate) const ASK_TO_SUMMARIZE: &str = r#"
-Are you able to confidently answer my initial question now?
+Are you able to confidently answer my initial question in detail now?
 If so, say `IN SUMMARY:`, followed by your answer.
 Otherwise, continue to SEARCH_FILES and READ_LINES as needed.
 "#;

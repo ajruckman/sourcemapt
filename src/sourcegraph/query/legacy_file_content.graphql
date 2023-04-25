@@ -1,0 +1,10 @@
+query LegacyFileContent($repo: String!, $rev: String!, $path: String!) {
+    repository(name: $repo) {
+        commit(rev: $rev) {
+            file(path: $path) {
+                __typename
+                content
+            }
+        }
+    }
+}

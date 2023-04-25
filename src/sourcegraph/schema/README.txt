@@ -1,0 +1,2 @@
+- https://github.com/sourcegraph/sourcegraph/blob/main/cmd/frontend/graphqlbackend/schema.graphql
+- https://github.com/sourcegraph/code-intel-extensions/blob/master/schema/schema.graphql
