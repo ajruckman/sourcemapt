@@ -1,3 +1,5 @@
+extern crate core;
+
 mod consts;
 
 #[macro_use]
@@ -14,6 +16,7 @@ use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
 use std::{fmt, fs, process};
+use std::fmt::Debug;
 use toml::Value;
 use crate::sourcegraph::client::SourcegraphClient;
 
@@ -30,6 +33,14 @@ async fn main() {
     );
     sourcemapt.add_system();
 
+    let def = sourcemapt.sourcegraph_client.get_definition(
+        "github.com/kubernetes/kubezrnetes",
+        "master",
+        "test/e2e/framework/pod/wait.go",
+        433,
+        24,
+    ).await.unwrap_or_default();
+
     match sourcemapt.run_loop().await {
         None => {}
         Some(e) => {
@@ -38,8 +49,23 @@ async fn main() {
         }
     }
 
+    let _ = def;
+
     for message in sourcemapt.messages {
         println!("{}", message);
+    }
+}
+
+#[derive(Clone)]
+enum InjectedMessage {
+    AskToSummarize,
+}
+
+impl InjectedMessage {
+    fn get_string(&self) -> String {
+        match self {
+            InjectedMessage::AskToSummarize => consts::ASK_TO_SUMMARIZE.to_owned(),
+        }
     }
 }
 
@@ -47,7 +73,7 @@ enum SourcemaptMessage {
     System { content: String, hidden: bool },
     User { content: String, hidden: bool },
     Code { code: CodeBlock, hidden: bool },
-    Injected { content: String, hidden: bool },
+    Injected { kind: InjectedMessage, hidden: bool },
     Model { content: String, hidden: bool },
     CommandInvocation { command: Command, hidden: bool },
     CommandResult { content: String, hidden: bool },
@@ -64,6 +90,31 @@ impl SourcemaptMessage {
             SourcemaptMessage::CommandInvocation { hidden, .. } => *hidden,
             SourcemaptMessage::CommandResult { hidden, .. } => *hidden,
         }
+    }
+
+    fn is_summary(&self) -> bool {
+        match self {
+            SourcemaptMessage::System { .. } => {}
+            SourcemaptMessage::User { .. } => {}
+            SourcemaptMessage::Code { .. } => {}
+            SourcemaptMessage::Injected { .. } => {}
+            SourcemaptMessage::Model { content, .. } => return content.contains("IN SUMMARY:"),
+            SourcemaptMessage::CommandInvocation { .. } => {}
+            SourcemaptMessage::CommandResult { .. } => {}
+        }
+        false
+    }
+
+    fn hide(&mut self) {
+        match self {
+            SourcemaptMessage::System { hidden, .. } => *hidden = true,
+            SourcemaptMessage::User { hidden, .. } => *hidden = true,
+            SourcemaptMessage::Code { hidden, .. } => *hidden = true,
+            SourcemaptMessage::Injected { hidden, .. } => *hidden = true,
+            SourcemaptMessage::Model { hidden, .. } => *hidden = true,
+            SourcemaptMessage::CommandInvocation { hidden, .. } => *hidden = true,
+            SourcemaptMessage::CommandResult { hidden, .. } => *hidden = true,
+        };
     }
 }
 
@@ -82,8 +133,8 @@ impl Clone for SourcemaptMessage {
                 code: code.clone(),
                 hidden: *hidden,
             },
-            SourcemaptMessage::Injected { content, hidden } => SourcemaptMessage::Injected {
-                content: content.clone(),
+            SourcemaptMessage::Injected { kind, hidden } => SourcemaptMessage::Injected {
+                kind: kind.clone(),
                 hidden: *hidden,
             },
             SourcemaptMessage::Model { content, hidden } => SourcemaptMessage::Model {
@@ -239,9 +290,9 @@ impl SourcemaptMessage {
                 content: code.format(),
                 name: None,
             },
-            SourcemaptMessage::Injected { content, .. } => ChatMessage {
+            SourcemaptMessage::Injected { kind, .. } => ChatMessage {
                 role: Role::User,
-                content: content.clone(),
+                content: kind.get_string(),
                 name: None,
             },
             SourcemaptMessage::Model { content, .. } => ChatMessage {
@@ -261,18 +312,6 @@ impl SourcemaptMessage {
             },
         }
     }
-
-    fn map_to_role(&self) -> Role {
-        match self {
-            SourcemaptMessage::System { .. } => Role::System,
-            SourcemaptMessage::User { .. } => Role::User,
-            SourcemaptMessage::Code { .. } => Role::User,
-            SourcemaptMessage::Injected { .. } => Role::User,
-            SourcemaptMessage::Model { .. } => Role::Assistant,
-            SourcemaptMessage::CommandInvocation { .. } => Role::Assistant,
-            SourcemaptMessage::CommandResult { .. } => Role::User,
-        }
-    }
 }
 
 impl fmt::Display for SourcemaptMessage {
@@ -281,7 +320,7 @@ impl fmt::Display for SourcemaptMessage {
             SourcemaptMessage::System { content, hidden } => ("System", content.clone(), hidden),
             SourcemaptMessage::User { content, hidden } => ("User", content.clone(), hidden),
             SourcemaptMessage::Code { code, hidden } => ("Code", code.format(), hidden),
-            SourcemaptMessage::Injected { content, hidden } => ("UserInjected", content.clone(), hidden),
+            SourcemaptMessage::Injected { kind, hidden } => ("UserInjected", kind.get_string(), hidden),
             SourcemaptMessage::Model { content, hidden } => ("ModelMessage", content.clone(), hidden),
             SourcemaptMessage::CommandInvocation { command, hidden } => {
                 ("CommandInvocation", format!("{}", command), hidden)
@@ -362,7 +401,7 @@ impl Sourcemapt {
         responses = self.call_gpt4(
             &vec![SourcemaptMessage::User {
                 // content: "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_string(),
-                content: "Can you show me the content of the `WaitForPodNameRunningInNamespace` function?".to_string(),
+                content: "".to_string(),
                 hidden: false,
             }],
         ).await.ok()?.to_vec();
@@ -389,7 +428,7 @@ impl Sourcemapt {
 
                     responses = self.call_gpt4(&vec![
                         SourcemaptMessage::Injected {
-                            content: consts::ASK_TO_SUMMARIZE.to_owned(),
+                            kind: InjectedMessage::AskToSummarize,
                             hidden: false,
                         }
                     ]).await.unwrap().to_vec();
@@ -397,7 +436,7 @@ impl Sourcemapt {
                 ProcessResponsesOutcome::CallWithCommandResults(results) => {
                     print_success!("-> Outcome: Call with command results:");
                     for result in &results {
-                        print_success!("   {}", result);
+                        print_success!("| {}", result);
                     }
                     responses = self.call_gpt4(&results).await.unwrap().to_vec();
                 }
@@ -406,6 +445,8 @@ impl Sourcemapt {
                     return None;
                 }
             }
+
+            self.compact();
         }
     }
 
@@ -505,7 +546,7 @@ impl Sourcemapt {
         for response in responses {
             match response {
                 SourcemaptMessage::Model { .. } => {}
-                SourcemaptMessage::CommandInvocation { command, hidden } => {
+                SourcemaptMessage::CommandInvocation { command, .. } => {
                     println!("");
                     match command {
                         Command::SearchFiles { keywords } => {
@@ -535,7 +576,7 @@ impl Sourcemapt {
                                 .take(*n)
                                 .map(|v| v.to_owned())
                                 .collect::<Vec<String>>();
-                                // .join("\n");
+                            // .join("\n");
 
                             command_results.push(SourcemaptMessage::Code {
                                 code: CodeBlock {
@@ -558,8 +599,8 @@ impl Sourcemapt {
         }
 
         if let Some(last) = responses.last() {
-            if let SourcemaptMessage::Model { content, .. } = last {
-                if content.contains("IN SUMMARY:") {
+            if let SourcemaptMessage::Model { .. } = last {
+                if last.is_summary() {
                     return Ok(ProcessResponsesOutcome::Stop);
                 }
             }
@@ -568,7 +609,34 @@ impl Sourcemapt {
         Ok(ProcessResponsesOutcome::CallForIntrospect)
     }
 
-    fn eval_should_hide(&mut self) {}
+    fn compact(&mut self) {
+        let mut messages = self.messages.iter_mut().peekable();
+
+        while let Some(message) = messages.next() {
+            if let SourcemaptMessage::Injected { kind, .. } = message {
+                if let InjectedMessage::AskToSummarize = kind {
+                    if let Some(next) = messages.peek() {
+                        if !next.is_summary() {
+                            print_progress!("Hiding AskToSummarize message");
+                            message.hide();
+                        }
+                    }
+                }
+            }
+        }
+
+        for message in &self.messages {
+            match message {
+                SourcemaptMessage::System { .. } => {}
+                SourcemaptMessage::User { .. } => {}
+                SourcemaptMessage::Code { .. } => {}
+                SourcemaptMessage::Injected { .. } => {}
+                SourcemaptMessage::Model { .. } => {}
+                SourcemaptMessage::CommandInvocation { .. } => {}
+                SourcemaptMessage::CommandResult { .. } => {}
+            }
+        }
+    }
 }
 
 // TODO: If a Model response contains the same code sent as a User message (the model is attempting
