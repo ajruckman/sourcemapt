@@ -1,8 +1,8 @@
+use crate::sourcegraph::client::SourcegraphClient;
 use graphql_client::reqwest::post_graphql;
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use crate::sourcegraph::client::SourcegraphClient;
 
 use crate::sourcegraph::search_files::search_files::SearchFilesSearchResultsResults;
 
@@ -59,7 +59,7 @@ impl SourcegraphClient {
             "https://sourcegraph.com/.api/graphql",
             variables,
         )
-            .await?;
+        .await?;
 
         let response_data: search_files::ResponseData =
             response_body.data.expect("missing response data");

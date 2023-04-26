@@ -1,4 +1,6 @@
-use reqwest::Client;
+use graphql_client::reqwest::post_graphql;
+use graphql_client::{GraphQLQuery, Response};
+use reqwest::{Client, Error};
 
 pub struct SourcegraphClient {
     pub(crate) client: Client,
@@ -26,5 +28,18 @@ impl SourcegraphClient {
             .expect("Failed to build reqwest::Client");
 
         SourcegraphClient { client }
+    }
+
+    pub async fn post<Q: GraphQLQuery>(
+        &self,
+        variables: Q::Variables,
+    ) -> Result<Response<<Q as GraphQLQuery>::ResponseData>, Error>
+    {
+        post_graphql::<Q, _>(
+            &self.client,
+            "https://sourcegraph.com/.api/graphql",
+            variables,
+        )
+            .await
     }
 }

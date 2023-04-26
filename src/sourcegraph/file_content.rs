@@ -1,5 +1,4 @@
 use crate::sourcegraph::client::SourcegraphClient;
-use graphql_client::reqwest::post_graphql;
 use graphql_client::GraphQLQuery;
 use std::error::Error;
 
@@ -28,18 +27,12 @@ impl SourcegraphClient {
             path: path.to_owned(),
         };
 
-        let response_body = post_graphql::<LegacyFileContent, _>(
-            &self.client,
-            "https://sourcegraph.com/.api/graphql",
-            variables,
-        )
-        .await?;
-
-        let response_data: legacy_file_content::ResponseData =
-            response_body.data.expect("missing response data");
+        let response_data = self.post::<LegacyFileContent>(variables.into()).await?;
 
         Ok(GetFileContentResult {
             content: response_data
+                .data
+                .expect("missing data")
                 .repository
                 .expect("missing repository")
                 .commit

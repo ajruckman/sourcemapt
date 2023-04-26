@@ -22,7 +22,7 @@ for example `!SEARCH_FILES "kiwi manager" "KiwisHaveBeenManaged`, and you will g
 ```
 Multiple arguments will perform and OR search. Try using lots of different keyword combinations to ensure you get the best results. If you don't find results that are helpful, or if you think there may be better keywords to try, repeat the SEARCH_FILES command.
 
-If you want to see a snippet of code at a line number and n lines after it, you can output the following:
+Once you find relevant files, if you want to see a snippet of code at a line number and n lines after it, you can output the following:
 ```
 !READ_LINES "<path> "<line>" "<n>"
 ```
@@ -72,6 +72,6 @@ Do you have anything more to say? If so, say `CONTINUE`. Otherwise, say `COMPLET
 
 pub(crate) const ASK_TO_SUMMARIZE: &str = r#"
 Are you able to confidently answer my initial question in detail now?
-If so, say `IN SUMMARY:`, followed by your answer.
-Otherwise, continue to SEARCH_FILES and READ_LINES as needed.
+If so, say `IN SUMMARY:`, followed by your answer, with any relevant source code snippets.
+Otherwise, continue to use SEARCH_FILES and READ_LINES.
 "#;

@@ -1,15 +1,16 @@
-use std::error::Error;
-use graphql_client::GraphQLQuery;
-use graphql_client::reqwest::post_graphql;
-use reqwest::Client;
+use crate::sourcegraph::client::SourcegraphClient;
 use crate::sourcegraph::definition_and_hover;
+use graphql_client::reqwest::post_graphql;
+use graphql_client::GraphQLQuery;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 
 #[derive(GraphQLQuery)]
 #[graphql(
-schema_path = "src/sourcegraph/schema/code_intel_ext.graphql",
-query_path = "src/sourcegraph/query/legacy_definition_and_hover.graphql",
-response_derives = "Debug"
+    schema_path = "src/sourcegraph/schema/code_intel_ext.graphql",
+    query_path = "src/sourcegraph/query/legacy_definition_and_hover.graphql",
+    response_derives = "Debug"
 )]
 struct LegacyDefinitionAndHover;
 
@@ -18,30 +19,27 @@ pub struct GetDefinitionResult {}
 
 type GitObjectID = String;
 
-// pub async fn get_definition() -> Result<GetDefinitionResult, Box<dyn Error>> {
-//     let sourcegraph_api_token =
-//         std::env::var("SOURCEGRAPH_API_TOKEN").expect("Missing SOURCEGRAPH_API_TOKEN env var");
-//
-//     let client = Client::builder()
-//         .user_agent("graphql-rust/0.10.0")
-//         .default_headers(
-//             std::iter::once((
-//                 reqwest::header::AUTHORIZATION,
-//                 reqwest::header::HeaderValue::from_str(&format!(
-//                     "Bearer {}",
-//                     sourcegraph_api_token
-//                 ))
-//                     .unwrap(),
-//             ))
-//                 .collect(),
-//         )
-//         .build()?;
-//
-//     let variables = legacy_definition_and_hover::Variables {  };
-//
-//     let response_body =
-//         post_graphql::<SearchFiles, _>(&client, "https://sourcegraph.com/.api/graphql", variables)
-//             .await?;
-//
-//     Ok(GetDefinitionResult {})
-// }
+impl SourcegraphClient {
+    pub async fn get_definition(
+        &self,
+        repo: &str,
+        rev: &str,
+        path: &str,
+        line: u32,
+        char: u32,
+    ) -> Result<GetDefinitionResult, Box<dyn Error>> {
+        let variables = legacy_definition_and_hover::Variables {
+            repository: repo.to_owned(),
+            commit: rev.to_owned(),
+            path: path.to_owned(),
+            line: line as i64,
+            character: char as i64,
+        };
+
+        let response_body = self
+            .post::<LegacyDefinitionAndHover>(variables.into())
+            .await?;
+
+        Ok(GetDefinitionResult {})
+    }
+}

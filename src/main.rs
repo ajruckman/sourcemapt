@@ -46,6 +46,7 @@ async fn main() {
 enum SourcemaptMessage {
     System { content: String, hidden: bool },
     User { content: String, hidden: bool },
+    Code { code: CodeBlock, hidden: bool },
     Injected { content: String, hidden: bool },
     Model { content: String, hidden: bool },
     CommandInvocation { command: Command, hidden: bool },
@@ -57,6 +58,7 @@ impl SourcemaptMessage {
         match self {
             SourcemaptMessage::System { hidden, .. } => *hidden,
             SourcemaptMessage::User { hidden, .. } => *hidden,
+            SourcemaptMessage::Code { hidden, .. } => *hidden,
             SourcemaptMessage::Injected { hidden, .. } => *hidden,
             SourcemaptMessage::Model { hidden, .. } => *hidden,
             SourcemaptMessage::CommandInvocation { hidden, .. } => *hidden,
@@ -74,6 +76,10 @@ impl Clone for SourcemaptMessage {
             },
             SourcemaptMessage::User { content, hidden } => SourcemaptMessage::User {
                 content: content.clone(),
+                hidden: *hidden,
+            },
+            SourcemaptMessage::Code { code, hidden } => SourcemaptMessage::Code {
+                code: code.clone(),
                 hidden: *hidden,
             },
             SourcemaptMessage::Injected { content, hidden } => SourcemaptMessage::Injected {
@@ -96,6 +102,35 @@ impl Clone for SourcemaptMessage {
                     hidden: *hidden,
                 }
             }
+        }
+    }
+}
+
+struct CodeBlock {
+    lines: Vec<String>,
+    start: usize,
+}
+
+impl CodeBlock {
+    fn format(&self) -> String {
+        let max_line = self.start + self.lines.len();
+        let padding = max_line.to_string().len();
+
+        self.lines.iter()
+            .enumerate()
+            .map(|(i, line)| {
+                format!("{:width$} | {}", self.start + i, line, width = padding)
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+}
+
+impl Clone for CodeBlock {
+    fn clone(&self) -> Self {
+        CodeBlock {
+            lines: self.lines.clone(),
+            start: self.start,
         }
     }
 }
@@ -199,6 +234,11 @@ impl SourcemaptMessage {
                 content: content.clone(),
                 name: None,
             },
+            SourcemaptMessage::Code { code, .. } => ChatMessage {
+                role: Role::User,
+                content: code.format(),
+                name: None,
+            },
             SourcemaptMessage::Injected { content, .. } => ChatMessage {
                 role: Role::User,
                 content: content.clone(),
@@ -226,6 +266,7 @@ impl SourcemaptMessage {
         match self {
             SourcemaptMessage::System { .. } => Role::System,
             SourcemaptMessage::User { .. } => Role::User,
+            SourcemaptMessage::Code { .. } => Role::User,
             SourcemaptMessage::Injected { .. } => Role::User,
             SourcemaptMessage::Model { .. } => Role::Assistant,
             SourcemaptMessage::CommandInvocation { .. } => Role::Assistant,
@@ -239,6 +280,7 @@ impl fmt::Display for SourcemaptMessage {
         let (label, content, hidden) = match self {
             SourcemaptMessage::System { content, hidden } => ("System", content.clone(), hidden),
             SourcemaptMessage::User { content, hidden } => ("User", content.clone(), hidden),
+            SourcemaptMessage::Code { code, hidden } => ("Code", code.format(), hidden),
             SourcemaptMessage::Injected { content, hidden } => ("UserInjected", content.clone(), hidden),
             SourcemaptMessage::Model { content, hidden } => ("ModelMessage", content.clone(), hidden),
             SourcemaptMessage::CommandInvocation { command, hidden } => {
@@ -319,7 +361,8 @@ impl Sourcemapt {
 
         responses = self.call_gpt4(
             &vec![SourcemaptMessage::User {
-                content: "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_string(),
+                // content: "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_string(),
+                content: "Can you show me the content of the `WaitForPodNameRunningInNamespace` function?".to_string(),
                 hidden: false,
             }],
         ).await.ok()?.to_vec();
@@ -490,11 +533,15 @@ impl Sourcemapt {
                             let lines = content.lines()
                                 .skip(*start)
                                 .take(*n)
-                                .collect::<Vec<&str>>()
-                                .join("\n");
+                                .map(|v| v.to_owned())
+                                .collect::<Vec<String>>();
+                                // .join("\n");
 
-                            command_results.push(SourcemaptMessage::CommandResult {
-                                content: lines,
+                            command_results.push(SourcemaptMessage::Code {
+                                code: CodeBlock {
+                                    lines: lines,
+                                    start: *start,
+                                },
                                 hidden: false,
                             });
                         }
