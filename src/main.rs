@@ -5,21 +5,21 @@ mod consts;
 #[macro_use]
 mod util;
 
+mod message;
 mod sourcegraph;
+mod types;
 
+use crate::message::SourcemaptMessage;
+use crate::sourcegraph::client::SourcegraphClient;
+use crate::types::{CodeBlock, Command, InjectedMessage};
 use crossterm::queue;
 use openai_dive::v1::api::Client;
-use openai_dive::v1::resources::chat_completion::{ChatCompletionParameters, ChatMessage, Role};
-use regex::Regex;
+use openai_dive::v1::resources::chat_completion::ChatCompletionParameters;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
-use std::str::FromStr;
-use std::{fmt, fs, process};
-use std::fmt::Debug;
+use std::{fs, process};
 use toml::Value;
-use crate::sourcegraph::client::SourcegraphClient;
-use crate::sourcegraph::definition_and_hover::GetDefinitionResult;
 
 // TODO: Side analyzer to strip licenses, irrelevant comments, etc. from GET_LINES to save tokens
 
@@ -59,345 +59,6 @@ async fn main() {
 
     for message in sourcemapt.messages {
         println!("{}", message);
-    }
-}
-
-#[derive(Clone)]
-enum InjectedMessage {
-    AskToSummarize,
-}
-
-impl InjectedMessage {
-    fn get_string(&self) -> String {
-        match self {
-            InjectedMessage::AskToSummarize => consts::ASK_TO_SUMMARIZE.trim().to_owned(),
-        }
-    }
-}
-
-enum SourcemaptMessage {
-    System { content: String, hidden: bool },
-    User { content: String, hidden: bool },
-    Code { code: CodeBlock, hidden: bool },
-    Injected { kind: InjectedMessage, hidden: bool },
-    Model { content: String, hidden: bool },
-    CommandInvocation { command: Command, hidden: bool },
-    CommandResult { content: String, hidden: bool },
-}
-
-impl SourcemaptMessage {
-    fn hidden(&self) -> bool {
-        match self {
-            SourcemaptMessage::System { hidden, .. } => *hidden,
-            SourcemaptMessage::User { hidden, .. } => *hidden,
-            SourcemaptMessage::Code { hidden, .. } => *hidden,
-            SourcemaptMessage::Injected { hidden, .. } => *hidden,
-            SourcemaptMessage::Model { hidden, .. } => *hidden,
-            SourcemaptMessage::CommandInvocation { hidden, .. } => *hidden,
-            SourcemaptMessage::CommandResult { hidden, .. } => *hidden,
-        }
-    }
-
-    fn is_summary(&self) -> bool {
-        match self {
-            SourcemaptMessage::System { .. } => {}
-            SourcemaptMessage::User { .. } => {}
-            SourcemaptMessage::Code { .. } => {}
-            SourcemaptMessage::Injected { .. } => {}
-            SourcemaptMessage::Model { content, .. } => return content.contains("IN SUMMARY:"),
-            SourcemaptMessage::CommandInvocation { .. } => {}
-            SourcemaptMessage::CommandResult { .. } => {}
-        }
-        false
-    }
-
-    fn hide(&mut self) {
-        match self {
-            SourcemaptMessage::System { hidden, .. } => *hidden = true,
-            SourcemaptMessage::User { hidden, .. } => *hidden = true,
-            SourcemaptMessage::Code { hidden, .. } => *hidden = true,
-            SourcemaptMessage::Injected { hidden, .. } => *hidden = true,
-            SourcemaptMessage::Model { hidden, .. } => *hidden = true,
-            SourcemaptMessage::CommandInvocation { hidden, .. } => *hidden = true,
-            SourcemaptMessage::CommandResult { hidden, .. } => *hidden = true,
-        };
-    }
-}
-
-impl Clone for SourcemaptMessage {
-    fn clone(&self) -> Self {
-        match self {
-            SourcemaptMessage::System { content, hidden } => SourcemaptMessage::System {
-                content: content.clone(),
-                hidden: *hidden,
-            },
-            SourcemaptMessage::User { content, hidden } => SourcemaptMessage::User {
-                content: content.clone(),
-                hidden: *hidden,
-            },
-            SourcemaptMessage::Code { code, hidden } => SourcemaptMessage::Code {
-                code: code.clone(),
-                hidden: *hidden,
-            },
-            SourcemaptMessage::Injected { kind, hidden } => SourcemaptMessage::Injected {
-                kind: kind.clone(),
-                hidden: *hidden,
-            },
-            SourcemaptMessage::Model { content, hidden } => SourcemaptMessage::Model {
-                content: content.clone(),
-                hidden: *hidden,
-            },
-            SourcemaptMessage::CommandInvocation { command, hidden } => {
-                SourcemaptMessage::CommandInvocation {
-                    command: command.clone(),
-                    hidden: *hidden,
-                }
-            }
-            SourcemaptMessage::CommandResult { content, hidden } => {
-                SourcemaptMessage::CommandResult {
-                    content: content.clone(),
-                    hidden: *hidden,
-                }
-            }
-        }
-    }
-}
-
-struct CodeBlock {
-    lines: Vec<String>,
-    start: usize,
-}
-
-impl CodeBlock {
-    fn format(&self) -> String {
-        let max_line = self.start + self.lines.len();
-        let padding = max_line.to_string().len();
-
-        self.lines.iter()
-            .enumerate()
-            .map(|(i, line)| {
-                format!("{:width$} | {}", self.start + i + 1, line, width = padding) // Print non-zero-based
-            })
-            .collect::<Vec<String>>()
-            .join("\n")
-    }
-}
-
-impl Clone for CodeBlock {
-    fn clone(&self) -> Self {
-        CodeBlock {
-            lines: self.lines.clone(),
-            start: self.start,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum Command {
-    SearchFiles {
-        keywords: Vec<String>,
-    },
-    ReadLines {
-        file: String,
-        start: usize,
-        n: usize,
-    },
-    Jump {
-        file: String,
-        line: usize,
-        char: usize,
-        n: usize,
-    },
-}
-
-impl Command {
-    fn match_line(line: &str) -> bool {
-        Regex::new(r#"^`?!(\w+) (?:"([^"]+)"*(?: |$|`$))*"#)
-            .unwrap()
-            .is_match(line)
-    }
-    fn serialize(&self) -> String {
-        match self {
-            Command::SearchFiles { keywords } => format!(
-                r#"!SEARCH_FILES "{}"#,
-                keywords
-                    .iter()
-                    .map(|v| format!(r#""{}""#, v))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            Command::ReadLines { file, start, n } => {
-                format!(r#"!READ_LINES "{}" "{}" "{}""#, file, start, n)
-            }
-            Command::Jump { file, line, char, n } => {
-                format!(r#"!JUMP "{}" "{}" "{}" "{}""#, file, line, char, n)
-            }
-        }
-    }
-}
-
-impl Clone for Command {
-    fn clone(&self) -> Self {
-        match self {
-            Command::SearchFiles { keywords: query } => Command::SearchFiles {
-                keywords: query.clone(),
-            },
-            Command::ReadLines { file, start, n } => Command::ReadLines {
-                file: file.clone(),
-                start: *start,
-                n: *n,
-            },
-            Command::Jump { file, line, char, n } => Command::Jump {
-                file: file.clone(),
-                line: *line,
-                char: *char,
-                n: *n,
-            }
-        }
-    }
-}
-
-impl FromStr for Command {
-    type Err = Box<dyn Error>;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // let re = Regex::new(r#"^`?! *(\w+)(?: +"([^"]+)")+ *`?$"#).unwrap();
-
-        let re = Regex::new(r#"^`?!(\w+)((?:\s+"[^"]+")*)"#).unwrap();
-        let captures = re.captures(s).expect("Invalid command format");
-        let name = captures.get(1).map_or("", |m| m.as_str()).to_owned();
-
-        let args_str = captures.get(2).map_or("", |m| m.as_str());
-        let re_args = Regex::new(r#""([^"]+)""#).unwrap();
-        let args = re_args
-            .captures_iter(args_str)
-            .map(|c| c.get(1).unwrap().as_str().to_owned())
-            .collect::<Vec<_>>();
-
-        match name.as_str() {
-            "SEARCH_FILES" => Ok(Command::SearchFiles { keywords: args }),
-            "READ_LINES" => {
-                if args.len() != 3 {
-                    return Err(format!("Expected 3 arguments, got {}", args.len()).into());
-                }
-                let file = args[0].clone();
-                let start = args[1].parse::<usize>().map_err(|e| e.to_owned())?;
-                let n = args[2].parse::<usize>().map_err(|e| e.to_owned())?;
-                Ok(Command::ReadLines {
-                    file,
-                    start,
-                    n,
-                })
-            }
-            "JUMP" => {
-                if args.len() != 4 {
-                    return Err(format!("Expected 4 arguments, got {}", args.len()).into());
-                }
-                let file = args[0].clone();
-                let line = args[1].parse::<usize>().map_err(|e| e.to_string())?;
-                let char = args[2].parse::<usize>().map_err(|e| e.to_string())?;
-                let n = args[3].parse::<usize>().map_err(|e| e.to_string())?;
-                Ok(Command::Jump {
-                    file,
-                    line,
-                    char,
-                    n,
-                })
-            }
-            _ => Err(format!("Unknown command: {}", name).into()),
-        }
-    }
-}
-
-impl SourcemaptMessage {
-    fn map_to_chat_message(&self) -> ChatMessage {
-        match self {
-            SourcemaptMessage::System { content, .. } => ChatMessage {
-                role: Role::System,
-                content: content.clone(),
-                name: None,
-            },
-            SourcemaptMessage::User { content, .. } => ChatMessage {
-                role: Role::User,
-                content: content.clone(),
-                name: None,
-            },
-            SourcemaptMessage::Code { code, .. } => ChatMessage {
-                role: Role::User,
-                content: code.format(),
-                name: None,
-            },
-            SourcemaptMessage::Injected { kind, .. } => ChatMessage {
-                role: Role::User,
-                content: kind.get_string(),
-                name: None,
-            },
-            SourcemaptMessage::Model { content, .. } => ChatMessage {
-                role: Role::Assistant,
-                content: content.clone(),
-                name: None,
-            },
-            SourcemaptMessage::CommandInvocation { command, .. } => ChatMessage {
-                role: Role::Assistant,
-                content: command.serialize(),
-                name: None,
-            },
-            SourcemaptMessage::CommandResult { content, .. } => ChatMessage {
-                role: Role::User,
-                content: content.clone(),
-                name: None,
-            },
-        }
-    }
-}
-
-impl fmt::Display for SourcemaptMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (label, content, hidden) = match self {
-            SourcemaptMessage::System { content, hidden } => ("System", content.clone(), hidden),
-            SourcemaptMessage::User { content, hidden } => ("User", content.clone(), hidden),
-            SourcemaptMessage::Code { code, hidden } => ("Code", code.format(), hidden),
-            SourcemaptMessage::Injected { kind, hidden } => ("UserInjected", kind.get_string(), hidden),
-            SourcemaptMessage::Model { content, hidden } => ("ModelMessage", content.clone(), hidden),
-            SourcemaptMessage::CommandInvocation { command, hidden } => {
-                ("CommandInvocation", format!("{}", command), hidden)
-            }
-            SourcemaptMessage::CommandResult { content, hidden } => ("CommandResult", content.clone(), hidden),
-        };
-
-        write!(f, "{} [hidden: {}]\n", label, hidden)?;
-        write_lines(f, &content)
-    }
-}
-
-fn write_lines(f: &mut fmt::Formatter<'_>, content: &str) -> fmt::Result {
-    for line in content.lines() {
-        writeln!(f, "| {}", line)?;
-    }
-    Ok(())
-}
-
-impl fmt::Display for Command {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Command::SearchFiles { keywords } => {
-                write!(
-                    f,
-                    "SearchFiles: query={}",
-                    keywords
-                        .iter()
-                        .map(|v| format!(r#""{}""#, v))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            }
-            Command::ReadLines { file, start, n } => {
-                write!(f, "ReadLines: file={}, start={}, n={}", file, start, n)
-            }
-            Command::Jump { file, line, char, n } => {
-                write!(f, "Jump: file={}, line={}, char={}, n={}", file, line, char, n)
-            }
-        }
     }
 }
 
@@ -584,10 +245,11 @@ impl Sourcemapt {
         let mut command_results = Vec::new();
 
         for response in responses {
+            println!("");
+
             match response {
                 SourcemaptMessage::Model { .. } => {}
                 SourcemaptMessage::CommandInvocation { command, .. } => {
-                    println!("");
                     match command {
                         Command::SearchFiles { keywords } => {
                             let res = self.sourcegraph_client.search_files(
