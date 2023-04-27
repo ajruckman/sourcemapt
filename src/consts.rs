@@ -26,18 +26,32 @@ Once you find relevant files, if you want to see a snippet of code at a line num
 ```
 !READ_LINES "<path> "<line>" "<n>"
 ```
-for example `!READ_LINES "pkg/generated/kiwi/core/v1/zz_generated_kiwis_manager.go" "738" "5"`, and you will get results like:
+for example `!READ_LINES "pkg/generated/kiwi/core/v1/zz_generated_kiwis_manager.go" "738" "10"`, and you will get results like:
 ```
-func (km *kiwiManager) KiwisHaveBeenManaged() bool {
-	return km.kiwiManager.KiwisHaveBeenManaged()
-}
-
-func (km *kiwiManager) KiwiIsAttached(
+738 | func (km *kiwiManager) KiwisHaveBeenManaged() bool {
+739 |     return km.kiwiManager.KiwisHaveBeenManaged()
+740 | }
+741 |
+742 | func (km *kiwiManager) KiwiIsAttached(
+743 | ...
 ```
 If you want to see more lines, repeat the !READ_LINES command with a new line number and n.
 Don't show the user the full output of this source code; they can already see it. Only show them the relevant lines of code and explain why they are relevant.
 
-Remember, if you think you can find more code, repeat the !SEARCH_FILES command with new keywords.
+If you want to jump to the definition of a symbol (function call, class name, etc.), you can output the following:
+```
+!JUMP "<path>" "<line>" "<character>" "<n>"
+```
+for example `!JUMP "pkg/generated/kiwi/core/v1/zz_generated_kiwis_manager.go" "739" "27" "10"`, and you will get results like:
+```
+22 | func (km *kiwiManager) KiwisHaveBeenManaged() bool {
+23 |     o, ok := k.lifecycle.(lifecycle.ObjectLifecycleCondition)
+24 |     return !ok || o.HasCreate()
+25 | }
+26 | ...
+```
+
+Remember, if you think you can find more code, repeat the !SEARCH_FILES command with new keywords. Don't make assumptions about how functions are implemented without seeing their source code.
 "#;
 
 pub(crate) const TEST1: &str = r#"
@@ -73,5 +87,5 @@ Do you have anything more to say? If so, say `CONTINUE`. Otherwise, say `COMPLET
 pub(crate) const ASK_TO_SUMMARIZE: &str = r#"
 Are you able to confidently answer my initial question in detail now?
 If so, say `IN SUMMARY:`, followed by your answer, with any relevant source code snippets.
-Otherwise, continue to use SEARCH_FILES and READ_LINES.
+Otherwise, continue to use SEARCH_FILES, READ_LINES, and JUMP.
 "#;

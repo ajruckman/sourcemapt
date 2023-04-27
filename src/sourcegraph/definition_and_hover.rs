@@ -84,7 +84,7 @@ impl SourcegraphClient {
             .lsif
             .ok_or_else(|| SourcegraphError("missing lsif".to_owned()))?;
 
-        if lsif.hover.is_none() {
+        if lsif.hover.is_none() || lsif.definitions.nodes.is_empty() {
             return Ok(None);
         }
 

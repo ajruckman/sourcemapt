@@ -19,8 +19,14 @@ use std::{fmt, fs, process};
 use std::fmt::Debug;
 use toml::Value;
 use crate::sourcegraph::client::SourcegraphClient;
+use crate::sourcegraph::definition_and_hover::GetDefinitionResult;
 
 // TODO: Side analyzer to strip licenses, irrelevant comments, etc. from GET_LINES to save tokens
+
+// TODO: "Decision" system which keeps track of a set of shown data which can all be hidden when
+// the AI makes a decision
+// For example, let the AI traverse the directory tree to find files it might want to look at
+// These messages don't need to be kept once the AI decides what file it wants to see
 
 #[tokio::main]
 async fn main() {
@@ -64,7 +70,7 @@ enum InjectedMessage {
 impl InjectedMessage {
     fn get_string(&self) -> String {
         match self {
-            InjectedMessage::AskToSummarize => consts::ASK_TO_SUMMARIZE.to_owned(),
+            InjectedMessage::AskToSummarize => consts::ASK_TO_SUMMARIZE.trim().to_owned(),
         }
     }
 }
@@ -170,7 +176,7 @@ impl CodeBlock {
         self.lines.iter()
             .enumerate()
             .map(|(i, line)| {
-                format!("{:width$} | {}", self.start + i, line, width = padding)
+                format!("{:width$} | {}", self.start + i + 1, line, width = padding) // Print non-zero-based
             })
             .collect::<Vec<String>>()
             .join("\n")
@@ -196,6 +202,12 @@ enum Command {
         start: usize,
         n: usize,
     },
+    Jump {
+        file: String,
+        line: usize,
+        char: usize,
+        n: usize,
+    },
 }
 
 impl Command {
@@ -215,7 +227,10 @@ impl Command {
                     .join(" ")
             ),
             Command::ReadLines { file, start, n } => {
-                format!(r#"!READ_LINES "{}" "{}" "{}"#, file, start, n)
+                format!(r#"!READ_LINES "{}" "{}" "{}""#, file, start, n)
+            }
+            Command::Jump { file, line, char, n } => {
+                format!(r#"!JUMP "{}" "{}" "{}" "{}""#, file, line, char, n)
             }
         }
     }
@@ -232,6 +247,12 @@ impl Clone for Command {
                 start: *start,
                 n: *n,
             },
+            Command::Jump { file, line, char, n } => Command::Jump {
+                file: file.clone(),
+                line: *line,
+                char: *char,
+                n: *n,
+            }
         }
     }
 }
@@ -244,13 +265,13 @@ impl FromStr for Command {
 
         let re = Regex::new(r#"^`?!(\w+)((?:\s+"[^"]+")*)"#).unwrap();
         let captures = re.captures(s).expect("Invalid command format");
-        let name = captures.get(1).map_or("", |m| m.as_str()).to_string();
+        let name = captures.get(1).map_or("", |m| m.as_str()).to_owned();
 
         let args_str = captures.get(2).map_or("", |m| m.as_str());
         let re_args = Regex::new(r#""([^"]+)""#).unwrap();
         let args = re_args
             .captures_iter(args_str)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+            .map(|c| c.get(1).unwrap().as_str().to_owned())
             .collect::<Vec<_>>();
 
         match name.as_str() {
@@ -259,11 +280,27 @@ impl FromStr for Command {
                 if args.len() != 3 {
                     return Err(format!("Expected 3 arguments, got {}", args.len()).into());
                 }
-                let start = args[1].parse::<usize>().map_err(|e| e.to_string())?;
-                let n = args[2].parse::<usize>().map_err(|e| e.to_string())?;
+                let file = args[0].clone();
+                let start = args[1].parse::<usize>().map_err(|e| e.to_owned())?;
+                let n = args[2].parse::<usize>().map_err(|e| e.to_owned())?;
                 Ok(Command::ReadLines {
-                    file: args[0].clone(),
+                    file,
                     start,
+                    n,
+                })
+            }
+            "JUMP" => {
+                if args.len() != 4 {
+                    return Err(format!("Expected 4 arguments, got {}", args.len()).into());
+                }
+                let file = args[0].clone();
+                let line = args[1].parse::<usize>().map_err(|e| e.to_string())?;
+                let char = args[2].parse::<usize>().map_err(|e| e.to_string())?;
+                let n = args[3].parse::<usize>().map_err(|e| e.to_string())?;
+                Ok(Command::Jump {
+                    file,
+                    line,
+                    char,
                     n,
                 })
             }
@@ -357,6 +394,9 @@ impl fmt::Display for Command {
             Command::ReadLines { file, start, n } => {
                 write!(f, "ReadLines: file={}, start={}, n={}", file, start, n)
             }
+            Command::Jump { file, line, char, n } => {
+                write!(f, "Jump: file={}, line={}, char={}, n={}", file, line, char, n)
+            }
         }
     }
 }
@@ -390,7 +430,7 @@ impl Sourcemapt {
 
     fn add_system(&mut self) {
         self.messages.push(SourcemaptMessage::System {
-            content: consts::SYSTEM.to_string(),
+            content: consts::SYSTEM.trim().to_owned(),
             hidden: false,
         });
     }
@@ -400,8 +440,8 @@ impl Sourcemapt {
 
         responses = self.call_gpt4(
             &vec![SourcemaptMessage::User {
-                // content: "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_string(),
-                content: "".to_string(),
+                // content: "I'm interested to know how the kubelet volume manager determines whether reconciler states have been synced. What is some relevant code?".to_owned(),
+                content: "What is the purpose of the `endpoints.RepackSubsets(subsets)` function call in the Endpoints Controller syncService, and how does it affect the resulting `subsets`?".to_owned(),
                 hidden: false,
             }],
         ).await.ok()?.to_vec();
@@ -421,7 +461,7 @@ impl Sourcemapt {
 
                     // responses = self.call_gpt4(&vec![
                     //     SourcemaptMessage::Injected {
-                    //         content: "Can I see some more content from the first file?".to_string(),
+                    //         content: "Can I see some more content from the first file?".to_owned(),
                     //         hidden: false,
                     //     }
                     // ]).await.unwrap().to_vec();
@@ -470,10 +510,10 @@ impl Sourcemapt {
         //
 
         let parameters = ChatCompletionParameters {
-            model: "gpt-4".to_string(),
+            model: "gpt-4".to_owned(),
             messages: prompt_messages,
             temperature: None,
-            top_p: None,
+            top_p: Some(0.1),
             n: None,
             stop: None,
             max_tokens: Some(512),
@@ -563,20 +603,17 @@ impl Sourcemapt {
                             })
                         }
                         Command::ReadLines { file, start, n } => {
-                            let file_content_result = self.sourcegraph_client.get_file_content(
+                            let content = self.sourcegraph_client.get_file_content(
                                 &self.repo,
                                 &self.refspec,
                                 file,
-                            ).await?;
-
-                            let content = file_content_result.content;
+                            ).await?.content;
 
                             let lines = content.lines()
                                 .skip(*start)
                                 .take(*n)
                                 .map(|v| v.to_owned())
                                 .collect::<Vec<String>>();
-                            // .join("\n");
 
                             command_results.push(SourcemaptMessage::Code {
                                 code: CodeBlock {
@@ -585,6 +622,47 @@ impl Sourcemapt {
                                 },
                                 hidden: false,
                             });
+                        }
+                        Command::Jump { file, line, char, n } => {
+                            let definition_result = self.sourcegraph_client.get_definition(
+                                &self.repo,
+                                &self.refspec,
+                                file,
+                                *line as u32,
+                                *char as u32,
+                            ).await?;
+
+                            match definition_result {
+                                None => {
+                                    command_results.push(SourcemaptMessage::User {
+                                        content: format!("Couldn't find definition for `{}`", file),
+                                        hidden: false,
+                                    });
+                                }
+                                Some(v) => {
+                                    let def = v.definitions.first().unwrap();
+
+                                    let content = self.sourcegraph_client.get_file_content(
+                                        &def.resource.repo,
+                                        &def.resource.commit_oid,
+                                        &def.resource.path,
+                                    ).await?.content;
+
+                                    let lines = content.lines()
+                                        .skip(def.range.line_start as usize)
+                                        .take(*n)
+                                        .map(|v| v.to_owned())
+                                        .collect::<Vec<String>>();
+
+                                    command_results.push(SourcemaptMessage::Code {
+                                        code: CodeBlock {
+                                            lines: lines,
+                                            start: def.range.line_start as usize,
+                                        },
+                                        hidden: false,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -613,6 +691,7 @@ impl Sourcemapt {
         let mut messages = self.messages.iter_mut().peekable();
 
         while let Some(message) = messages.next() {
+            if message.hidden() { continue; }
             if let SourcemaptMessage::Injected { kind, .. } = message {
                 if let InjectedMessage::AskToSummarize = kind {
                     if let Some(next) = messages.peek() {
@@ -664,7 +743,7 @@ fn read_or_create_config() -> Result<String, Box<dyn Error>> {
     let config = fs::read_to_string(&config_path)?.parse::<Value>()?;
 
     let key = match config.get("key") {
-        Some(key) => key.as_str().unwrap_or("").to_string(),
+        Some(key) => key.as_str().unwrap_or("").to_owned(),
         None => {
             print_error!(
                 "The 'key' value is not set in the configuration file: {}",
